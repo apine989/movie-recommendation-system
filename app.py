@@ -14,7 +14,7 @@ from recommender_core import (
 from tmdb_client import get_popular_movies
 
 
-# ---------- Load data and basic options ----------
+# Load data and basic options
 df = get_dataset()
 titles = get_title_list()
 
@@ -119,12 +119,12 @@ min_votes = st.sidebar.slider(
 )
 
 selected_languages = st.sidebar.multiselect(
-    "Languages (original_language)",
+    "Languages",
     options=language_options,
 )
 
 selected_genres = st.sidebar.multiselect(
-    "Required genres (movie must contain all)",
+    "Genres (match exact)",
     options=genre_options,
 )
 
