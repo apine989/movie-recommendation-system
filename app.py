@@ -1,40 +1,84 @@
 import streamlit as st
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 from recommender_core import (
     get_dataset,
     get_title_list,
     recommend_by_content,
     recommend_by_text,
+    build_content_features,
+    apply_filters,
+    _get_index_for_title,
 )
 from tmdb_client import get_popular_movies
 
 
-# Load data once
+# ---------- Load data and basic options ----------
 df = get_dataset()
 titles = get_title_list()
 
-# Pre-compute values for the year slider so we don't do this on every rerun.
 year_values = sorted(
     {int(y) for y in df["year"].dropna() if str(y).isdigit()}
 ) or [2000, 2025]
 year_min_default = year_values[0]
 year_max_default = year_values[-1]
 
-# Unique language codes in the dataset, used for the language filter.
+# Runtime range (may have missing values).
+if "runtime" in df.columns:
+    runtime_values = sorted(
+        {
+            int(r)
+            for r in df["runtime"].dropna()
+            if str(r).isdigit() and int(r) > 0
+        }
+    )
+else:
+    runtime_values = []
+
+if runtime_values:
+    runtime_min_default = runtime_values[0]
+    runtime_max_default = runtime_values[-1]
+else:
+    runtime_min_default = 60
+    runtime_max_default = 240
+
 language_options = sorted(df["original_language"].dropna().unique().tolist())
 
-# Collect a flat list of all genre labels.
 all_genres = set()
 for gs in df["genres"]:
     if isinstance(gs, list):
         all_genres.update(gs)
 genre_options = sorted(all_genres)
 
+# Certifications
+if "certification" in df.columns:
+    cert_options = sorted(
+        {c for c in df["certification"].dropna().unique().tolist() if c}
+    )
+else:
+    cert_options = []
 
-# Streamlit layout
+# Actor / director options
+actor_options = []
+if "cast_names" in df.columns:
+    actor_set = set()
+    for names in df["cast_names"]:
+        if isinstance(names, list):
+            actor_set.update(names)
+    actor_options = sorted(actor_set)
+
+director_options = []
+if "director_names" in df.columns:
+    director_set = set()
+    for names in df["director_names"]:
+        if isinstance(names, list):
+            director_set.update(names)
+    director_options = sorted(director_set)
+
+
 st.set_page_config(page_title="Movie Recommendation System", layout="wide")
 st.title("🎬 Movie Recommendation System")
-
 st.write(
     "Pick a movie you like, tune the filters, and choose a recommendation method."
 )
@@ -48,6 +92,14 @@ year_range = st.sidebar.slider(
     max_value=year_max_default,
     value=(year_min_default, year_max_default),
     step=1,
+)
+
+runtime_range = st.sidebar.slider(
+    "Runtime (minutes)",
+    min_value=runtime_min_default,
+    max_value=runtime_max_default,
+    value=(runtime_min_default, runtime_max_default),
+    step=5,
 )
 
 min_rating = st.sidebar.slider(
@@ -76,14 +128,28 @@ selected_genres = st.sidebar.multiselect(
     options=genre_options,
 )
 
-# Simple watchlist that lives in the sidebar; used to build a user profile.
+selected_certs = st.sidebar.multiselect(
+    "Certification levels",
+    options=cert_options,
+)
+
+selected_actors = st.sidebar.multiselect(
+    "Preferred actors (any match)",
+    options=actor_options,
+)
+
+selected_directors = st.sidebar.multiselect(
+    "Preferred directors (any match)",
+    options=director_options,
+)
+
 st.sidebar.header("Your watchlist")
 watchlist_titles = st.sidebar.multiselect(
     "Add movies you like",
     options=titles,
 )
 
-# Main controls: pick a seed movie and recommendation method.
+# Main controls
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -101,10 +167,8 @@ with col2:
 top_n = st.slider("Number of recommendations", 5, 30, 10)
 
 col_btn1, col_btn2 = st.columns(2)
-
 with col_btn1:
     run_seed = st.button("Get recommendations from seed movie")
-
 with col_btn2:
     run_watchlist = st.button("Get recommendations from my watchlist")
 
@@ -118,6 +182,11 @@ def build_filter_kwargs():
         min_votes=min_votes,
         languages=selected_languages or None,
         required_genres=selected_genres or None,
+        min_runtime=runtime_range[0],
+        max_runtime=runtime_range[1],
+        certifications=selected_certs or None,
+        actor_names=selected_actors or None,
+        director_names=selected_directors or None,
     )
 
 
@@ -141,7 +210,6 @@ if run_seed:
                 f"**{seed_title}** based on TF-IDF text similarity."
             )
     except ValueError as e:
-        # Most likely: the selected seed title wasn't found in the dataset.
         st.error(str(e))
         recs = None
         explanation = ""
@@ -158,8 +226,12 @@ if run_seed:
                 f"⭐ Rating: {row['vote_average']}  "
                 f"(votes: {row['vote_count']})"
             )
-            if isinstance(row["genres"], list):
+            if "runtime" in row and not np.isnan(row["runtime"]):
+                st.write(f"Runtime: {int(row['runtime'])} min")
+            if isinstance(row.get("genres"), list):
                 st.write("Genres:", ", ".join(row["genres"]))
+            if row.get("certification"):
+                st.write("Certification:", row["certification"])
             st.write(row["overview"])
             st.markdown(
                 f"_Similarity score: {row['similarity']:.3f} "
@@ -168,33 +240,17 @@ if run_seed:
             st.markdown("---")
 
 
-# Watchlist-based recommendations (enhanced feature)
-# The idea here is to build a "user profile" as the average of the
-# content-based vectors of all movies in the user's watchlist.
-from recommender_core import recommend_by_content  # reuse content method
-
+# Watchlist-based recommendations
 if run_watchlist:
     if not watchlist_titles:
         st.warning("Add at least one movie to your watchlist in the sidebar.")
     else:
         filter_kwargs = build_filter_kwargs()
-        from recommender_core import (
-            recommend_by_content as _rec_content,  # noqa: F401 (kept for clarity)
-        )
-        from recommender_core import (
-            get_dataset,
-            _get_index_for_title,
-            build_content_features,
-        )
-        import numpy as np
-        from sklearn.metrics.pairwise import cosine_similarity
 
+        # Build content matrix and a simple profile vector.
+        content_matrix = build_content_features()
         df_full = get_dataset()
-        # Make sure the content matrix is initialised.
-        build_content_features()
-        from recommender_core import _content_matrix  # type: ignore
 
-        # Collect indices of movies in the user's watchlist.
         indices = [
             _get_index_for_title(t)
             for t in watchlist_titles
@@ -203,17 +259,13 @@ if run_watchlist:
         if not indices:
             st.warning("Could not find your watchlist titles in the dataset.")
         else:
-            # Average vector across watchlist titles => simple profile.
-            profile_vec = _content_matrix[indices].mean(axis=0, keepdims=True)
-            sims = cosine_similarity(profile_vec, _content_matrix)[0]
+            profile_vec = content_matrix[indices].mean(axis=0, keepdims=True)
+            sims = cosine_similarity(profile_vec, content_matrix)[0]
 
             df_profile = df_full.copy()
             df_profile["similarity"] = sims
-            # Don't recommend movies the user already has in their watchlist.
             df_profile = df_profile[~df_profile["title"].isin(watchlist_titles)]
             df_profile = df_profile.sort_values("similarity", ascending=False)
-
-            from recommender_core import apply_filters
 
             df_profile = apply_filters(df_profile, **filter_kwargs)
             recs = df_profile.head(top_n)
@@ -235,8 +287,12 @@ if run_watchlist:
                         f"⭐ Rating: {row['vote_average']}  "
                         f"(votes: {row['vote_count']})"
                     )
-                    if isinstance(row["genres"], list):
+                    if "runtime" in row and not np.isnan(row["runtime"]):
+                        st.write(f"Runtime: {int(row['runtime'])} min")
+                    if isinstance(row.get("genres"), list):
                         st.write("Genres:", ", ".join(row["genres"]))
+                    if row.get("certification"):
+                        st.write("Certification:", row["certification"])
                     st.write(row["overview"])
                     st.markdown(
                         f"_Similarity score: {row['similarity']:.3f} "
@@ -245,9 +301,8 @@ if run_watchlist:
                     st.markdown("---")
 
 
-# Popular / trending section (enhanced feature)
+# Popular / trending section
 st.subheader("🔥 Popular right now (TMDB)")
-
 try:
     popular = get_popular_movies(page=1)[:10]
     for movie in popular:
@@ -257,5 +312,4 @@ try:
         votes = movie.get("vote_count")
         st.markdown(f"**{title}** ({year}) — ⭐ {rating} ({votes} votes)")
 except Exception as e:
-    # It's better for the app to keep working even if this call fails.
     st.warning(f"Could not load popular movies: {e}")

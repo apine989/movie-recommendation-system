@@ -3,10 +3,14 @@ from typing import Dict, List
 
 import pandas as pd
 
-from tmdb_client import _get  # reuse the low-level TMDB helper
+from tmdb_client import (
+    _get,
+    get_movie_details,
+    get_movie_credits,
+    get_movie_certification,
+)
 
 
-# Local cache so we don't hit TMDB every time the app starts.
 DATA_PATH = "movies.csv"
 
 
@@ -19,10 +23,7 @@ def _get_genre_map() -> Dict[int, str]:
 
 def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
     """
-    Fetch movies from TMDB discover endpoint and normalise the result a bit.
-
-    pages: how many pages of results to grab (20 movies per page).
-    min_vote_count: filter out movies with very few votes.
+    Fetch movies from TMDB discover endpoint and enrich them with extra metadata.
     """
     all_results: List[dict] = []
 
@@ -42,13 +43,13 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
 
     df = pd.DataFrame(all_results)
 
-    # Derive a simple year column we can use in filters.
+    # Simple year column from release_date.
     if "release_date" in df.columns:
         df["year"] = df["release_date"].str[:4]
     else:
         df["year"] = None
 
-    # Map genre IDs -> human-readable names.
+    # Map genre IDs -> names.
     genre_map = _get_genre_map()
 
     def ids_to_names(ids):
@@ -61,18 +62,59 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
     else:
         df["genres"] = [[] for _ in range(len(df))]
 
-    # Keep only columns we care about for the recommender for now.
+    # Extra columns we’ll fill from detail/credits endpoints.
+    df["runtime"] = pd.NA
+    df["certification"] = pd.NA
+    df["revenue"] = pd.NA
+    df["cast_names"] = [[] for _ in range(len(df))]
+    df["director_names"] = [[] for _ in range(len(df))]
+
+    # Enrich each movie with runtime, certification, and personnel info.
+    for idx, row in df.iterrows():
+        movie_id = row.get("id")
+        if pd.isna(movie_id):
+            continue
+        try:
+            details = get_movie_details(movie_id)
+            credits = get_movie_credits(movie_id)
+            cert = get_movie_certification(movie_id)
+        except Exception:
+            # If anything fails, just skip enrichment for this movie.
+            continue
+
+        df.at[idx, "runtime"] = details.get("runtime")
+        df.at[idx, "revenue"] = details.get("revenue")
+        df.at[idx, "certification"] = cert
+
+        cast_list = [
+            c.get("name")
+            for c in (credits.get("cast") or [])[:5]
+            if c.get("name")
+        ]
+        director_list = [
+            c.get("name")
+            for c in (credits.get("crew") or [])
+            if c.get("job") == "Director" and c.get("name")
+        ]
+        df.at[idx, "cast_names"] = cast_list
+        df.at[idx, "director_names"] = director_list
+
     keep_cols = [
         "id",
         "title",
         "overview",
         "year",
+        "runtime",
+        "certification",
         "vote_average",
         "vote_count",
         "original_language",
         "popularity",
         "genres",
         "genre_ids",
+        "cast_names",
+        "director_names",
+        "revenue",
         "poster_path",
     ]
     df = df[[c for c in keep_cols if c in df.columns]]
@@ -83,12 +125,16 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
 def load_or_build_dataset() -> pd.DataFrame:
     """
     If movies.csv exists, load it. Otherwise, fetch from TMDB and save.
-
-    This way we only make heavy API calls the first time.
     """
     if os.path.exists(DATA_PATH):
-        # genres is stored as a Python list; eval keeps that shape when reloading.
-        return pd.read_csv(DATA_PATH, converters={"genres": eval})
+        return pd.read_csv(
+            DATA_PATH,
+            converters={
+                "genres": eval,
+                "cast_names": eval,
+                "director_names": eval,
+            },
+        )
 
     df = _fetch_movies(pages=5, min_vote_count=200)
     df.to_csv(DATA_PATH, index=False)

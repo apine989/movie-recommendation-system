@@ -14,8 +14,6 @@ load_dotenv()
 def _get_api_key() -> str:
     """
     Look for the TMDB API key in the environment first, then in Streamlit secrets.
-
-    This keeps configuration out of the code and works both locally and in deployment.
     """
     key = os.getenv("TMDB_API_KEY")
 
@@ -44,7 +42,6 @@ def _get(path: str, params=None):
     if params is None:
         params = {}
 
-    # TMDB always expects the API key as a query parameter
     params["api_key"] = API_KEY
     url = f"{BASE_URL}{path}"
 
@@ -56,8 +53,34 @@ def _get(path: str, params=None):
 def get_popular_movies(page: int = 1):
     """
     Convenience helper for the 'popular movies' endpoint.
-
-    Used by the UI to show a small 'Trending now' section.
     """
     data = _get("/movie/popular", params={"page": page})
     return data["results"]
+
+
+def get_movie_details(movie_id: int):
+    """
+    Basic movie details including runtime and revenue.
+    """
+    return _get(f"/movie/{movie_id}", params={"language": "en-US"})
+
+
+def get_movie_credits(movie_id: int):
+    """
+    Cast and crew for a movie.
+    """
+    return _get(f"/movie/{movie_id}/credits", params={"language": "en-US"})
+
+
+def get_movie_certification(movie_id: int, region: str = "US"):
+    """
+    Return the first non-empty certification for the given region, e.g. 'PG-13'.
+    """
+    data = _get(f"/movie/{movie_id}/release_dates")
+    for entry in data.get("results", []):
+        if entry.get("iso_3166_1") == region:
+            for rel in entry.get("release_dates", []):
+                cert = rel.get("certification")
+                if cert:
+                    return cert
+    return None
