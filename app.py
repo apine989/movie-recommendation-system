@@ -9,21 +9,21 @@ from recommender_core import (
 from tmdb_client import get_popular_movies
 
 
-# --------- Load data once ---------
+# Load data once
 df = get_dataset()
 titles = get_title_list()
 
-# Years for slider
+# Pre-compute values for the year slider so we don't do this on every rerun.
 year_values = sorted(
     {int(y) for y in df["year"].dropna() if str(y).isdigit()}
 ) or [2000, 2025]
 year_min_default = year_values[0]
 year_max_default = year_values[-1]
 
-# Languages
+# Unique language codes in the dataset, used for the language filter.
 language_options = sorted(df["original_language"].dropna().unique().tolist())
 
-# Genres
+# Collect a flat list of all genre labels.
 all_genres = set()
 for gs in df["genres"]:
     if isinstance(gs, list):
@@ -31,7 +31,7 @@ for gs in df["genres"]:
 genre_options = sorted(all_genres)
 
 
-# --------- Streamlit layout ---------
+# Streamlit layout
 st.set_page_config(page_title="Movie Recommendation System", layout="wide")
 st.title("🎬 Movie Recommendation System")
 
@@ -76,14 +76,14 @@ selected_genres = st.sidebar.multiselect(
     options=genre_options,
 )
 
-# Watchlist (enhanced feature)
+# Simple watchlist that lives in the sidebar; used to build a user profile.
 st.sidebar.header("Your watchlist")
 watchlist_titles = st.sidebar.multiselect(
     "Add movies you like",
     options=titles,
 )
 
-# Main controls
+# Main controls: pick a seed movie and recommendation method.
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -110,6 +110,7 @@ with col_btn2:
 
 
 def build_filter_kwargs():
+    """Bundle current sidebar values into a dict for the core functions."""
     return dict(
         min_year=year_range[0],
         max_year=year_range[1],
@@ -120,6 +121,7 @@ def build_filter_kwargs():
     )
 
 
+# Seed-based recommendations
 if run_seed:
     filter_kwargs = build_filter_kwargs()
 
@@ -139,6 +141,7 @@ if run_seed:
                 f"**{seed_title}** based on TF-IDF text similarity."
             )
     except ValueError as e:
+        # Most likely: the selected seed title wasn't found in the dataset.
         st.error(str(e))
         recs = None
         explanation = ""
@@ -166,24 +169,32 @@ if run_seed:
 
 
 # Watchlist-based recommendations (enhanced feature)
+# The idea here is to build a "user profile" as the average of the
+# content-based vectors of all movies in the user's watchlist.
 from recommender_core import recommend_by_content  # reuse content method
-
 
 if run_watchlist:
     if not watchlist_titles:
         st.warning("Add at least one movie to your watchlist in the sidebar.")
     else:
         filter_kwargs = build_filter_kwargs()
-        from recommender_core import recommend_by_content as _rec_content
-        from recommender_core import get_dataset, _get_index_for_title, build_content_features
+        from recommender_core import (
+            recommend_by_content as _rec_content,  # noqa: F401 (kept for clarity)
+        )
+        from recommender_core import (
+            get_dataset,
+            _get_index_for_title,
+            build_content_features,
+        )
         import numpy as np
         from sklearn.metrics.pairwise import cosine_similarity
 
-        # Build a simple profile vector: average of content vectors of watchlist titles
         df_full = get_dataset()
-        build_content_features()  # ensures _content_matrix exists
+        # Make sure the content matrix is initialised.
+        build_content_features()
         from recommender_core import _content_matrix  # type: ignore
 
+        # Collect indices of movies in the user's watchlist.
         indices = [
             _get_index_for_title(t)
             for t in watchlist_titles
@@ -192,19 +203,25 @@ if run_watchlist:
         if not indices:
             st.warning("Could not find your watchlist titles in the dataset.")
         else:
+            # Average vector across watchlist titles => simple profile.
             profile_vec = _content_matrix[indices].mean(axis=0, keepdims=True)
             sims = cosine_similarity(profile_vec, _content_matrix)[0]
+
             df_profile = df_full.copy()
             df_profile["similarity"] = sims
+            # Don't recommend movies the user already has in their watchlist.
             df_profile = df_profile[~df_profile["title"].isin(watchlist_titles)]
             df_profile = df_profile.sort_values("similarity", ascending=False)
+
             from recommender_core import apply_filters
 
             df_profile = apply_filters(df_profile, **filter_kwargs)
             recs = df_profile.head(top_n)
 
             if recs.empty:
-                st.warning("No matches after applying filters. Try relaxing them.")
+                st.warning(
+                    "No matches after applying filters. Try relaxing them."
+                )
             else:
                 st.subheader("Recommendations from your watchlist profile")
                 st.markdown(
@@ -240,4 +257,5 @@ try:
         votes = movie.get("vote_count")
         st.markdown(f"**{title}** ({year}) — ⭐ {rating} ({votes} votes)")
 except Exception as e:
+    # It's better for the app to keep working even if this call fails.
     st.warning(f"Could not load popular movies: {e}")

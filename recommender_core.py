@@ -8,7 +8,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 
 from recommender_data import load_or_build_dataset
 
-# Simple in-memory cache so we only build things once
+# Simple in-memory caches so we only build things once per session.
 _df_cache: Optional[pd.DataFrame] = None
 _mlb: Optional[MultiLabelBinarizer] = None
 _tfidf: Optional[TfidfVectorizer] = None
@@ -17,26 +17,38 @@ _text_matrix = None
 
 
 def get_dataset() -> pd.DataFrame:
-    """Load the movie dataset and normalize some columns."""
+    """
+    Load the movie dataset and normalise a few columns.
+
+    We only want to hit disk / TMDB once, so the result is cached.
+    """
     global _df_cache
     if _df_cache is None:
         df = load_or_build_dataset()
         df = df.copy()
         df["overview"] = df["overview"].fillna("")
-        df["genres"] = df["genres"].apply(lambda x: x if isinstance(x, list) else [])
+        # Ensure genres is always a list so downstream code is simpler.
+        df["genres"] = df["genres"].apply(
+            lambda x: x if isinstance(x, list) else []
+        )
         _df_cache = df.reset_index(drop=True)
     return _df_cache
 
 
 def build_content_features():
-    """Build a feature matrix using genres + rating + popularity."""
+    """
+    Build a feature matrix using genres + rating + popularity.
+
+    This is the feature space used for the content-based recommender.
+    """
     global _mlb, _content_matrix
     df = get_dataset()
 
+    # Multi-hot encode the list of genre labels.
     _mlb = MultiLabelBinarizer()
     genre_features = _mlb.fit_transform(df["genres"])
 
-    # Add numeric features (vote_average and popularity)
+    # Numeric features are simply concatenated to the end of the genre vector.
     extra = df[["vote_average", "popularity"]].fillna(0).to_numpy()
 
     _content_matrix = np.hstack([genre_features, extra])
@@ -44,13 +56,18 @@ def build_content_features():
 
 
 def build_text_features():
-    """Build a TF-IDF matrix over the movie overviews."""
+    """
+    Build a TF-IDF matrix over the movie overviews.
+
+    This is the feature space used for the text-based (NLP) recommender.
+    """
     global _tfidf, _text_matrix
     df = get_dataset()
 
     _tfidf = TfidfVectorizer(stop_words="english", max_features=5000)
     _text_matrix = _tfidf.fit_transform(df["overview"])
     return _text_matrix
+
 
 def apply_filters(
     df: pd.DataFrame,
@@ -61,10 +78,14 @@ def apply_filters(
     languages: Optional[List[str]] = None,
     required_genres: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """Apply basic filters to a movie DataFrame."""
+    """
+    Apply the UI filters to a movie DataFrame.
+
+    Each argument is optional; when omitted, that particular filter is skipped.
+    """
     out = df.copy()
 
-    # Make a numeric year column for safe comparisons
+    # Make a numeric year column for safe comparisons.
     out["year_num"] = pd.to_numeric(out["year"], errors="coerce")
 
     if min_year is not None:
@@ -78,17 +99,21 @@ def apply_filters(
     if languages:
         out = out[out["original_language"].isin(languages)]
     if required_genres:
-        # Keep movies that contain ALL of the selected genres
-        out = out[out["genres"].apply(lambda gs: all(g in gs for g in required_genres))]
+        # Keep movies that contain ALL of the selected genres.
+        out = out[
+            out["genres"].apply(
+                lambda gs: all(g in gs for g in required_genres)
+            )
+        ]
 
-    # We don't need year_num in the final output
+    # We don't need year_num in the final output.
     out = out.drop(columns=["year_num"])
 
     return out
 
 
-
 def _get_index_for_title(title: str) -> Optional[int]:
+    """Return the index of a given title in the cached DataFrame, if present."""
     df = get_dataset()
     matches = df.index[df["title"] == title].tolist()
     return matches[0] if matches else None
@@ -99,7 +124,12 @@ def recommend_by_content(
     top_n: int = 10,
     **filter_kwargs,
 ) -> pd.DataFrame:
-    """Content-based recommendations using genres + numeric features."""
+    """
+    Content-based recommendations using genres + numeric features.
+
+    seed_title: movie the user likes.
+    top_n: how many recommendations to return (after filtering).
+    """
     df = get_dataset()
     global _content_matrix
     if _content_matrix is None:
@@ -109,11 +139,16 @@ def recommend_by_content(
     if idx is None:
         raise ValueError(f"Seed title not found: {seed_title}")
 
-    sims = cosine_similarity(_content_matrix[idx : idx + 1], _content_matrix)[0]
+    # Cosine similarity between the seed vector and every other movie.
+    sims = cosine_similarity(
+        _content_matrix[idx : idx + 1],
+        _content_matrix,
+    )[0]
 
     df = df.copy()
     df["similarity"] = sims
-    df = df[df["title"] != seed_title]  # don’t recommend the seed itself
+    # Don’t recommend the seed movie itself.
+    df = df[df["title"] != seed_title]
     df = df.sort_values("similarity", ascending=False)
 
     df = apply_filters(df, **filter_kwargs)
@@ -125,7 +160,11 @@ def recommend_by_text(
     top_n: int = 10,
     **filter_kwargs,
 ) -> pd.DataFrame:
-    """NLP-based recommendations using TF-IDF overplot descriptions."""
+    """
+    NLP-based recommendations using TF-IDF over plot descriptions.
+
+    The idea is: movies with similar overviews probably feel similar to watch.
+    """
     df = get_dataset()
     global _text_matrix
     if _text_matrix is None:
@@ -135,7 +174,10 @@ def recommend_by_text(
     if idx is None:
         raise ValueError(f"Seed title not found: {seed_title}")
 
-    sims = cosine_similarity(_text_matrix[idx : idx + 1], _text_matrix)[0]
+    sims = cosine_similarity(
+        _text_matrix[idx : idx + 1],
+        _text_matrix,
+    )[0]
 
     df = df.copy()
     df["similarity"] = sims
@@ -147,6 +189,6 @@ def recommend_by_text(
 
 
 def get_title_list() -> List[str]:
-    """Return all movie titles sorted alphabetically."""
+    """Return all movie titles sorted alphabetically for the UI select box."""
     df = get_dataset()
     return df["title"].sort_values().tolist()

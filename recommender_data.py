@@ -6,11 +6,12 @@ import pandas as pd
 from tmdb_client import _get  # reuse the low-level TMDB helper
 
 
+# Local cache so we don't hit TMDB every time the app starts.
 DATA_PATH = "movies.csv"
 
 
 def _get_genre_map() -> Dict[int, str]:
-    """Fetch a mapping from genre id -> genre name."""
+    """Fetch a mapping from genre id -> genre name from TMDB."""
     data = _get("/genre/movie/list", params={"language": "en-US"})
     genres = data.get("genres", [])
     return {g["id"]: g["name"] for g in genres}
@@ -18,7 +19,7 @@ def _get_genre_map() -> Dict[int, str]:
 
 def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
     """
-    Fetch movies from TMDB discover endpoint.
+    Fetch movies from TMDB discover endpoint and normalise the result a bit.
 
     pages: how many pages of results to grab (20 movies per page).
     min_vote_count: filter out movies with very few votes.
@@ -41,12 +42,13 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
 
     df = pd.DataFrame(all_results)
 
+    # Derive a simple year column we can use in filters.
     if "release_date" in df.columns:
         df["year"] = df["release_date"].str[:4]
     else:
         df["year"] = None
 
-    # Map genre IDs -> names
+    # Map genre IDs -> human-readable names.
     genre_map = _get_genre_map()
 
     def ids_to_names(ids):
@@ -59,7 +61,7 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
     else:
         df["genres"] = [[] for _ in range(len(df))]
 
-    # Keep only columns we care about for now
+    # Keep only columns we care about for the recommender for now.
     keep_cols = [
         "id",
         "title",
@@ -81,8 +83,11 @@ def _fetch_movies(pages: int = 5, min_vote_count: int = 200) -> pd.DataFrame:
 def load_or_build_dataset() -> pd.DataFrame:
     """
     If movies.csv exists, load it. Otherwise, fetch from TMDB and save.
+
+    This way we only make heavy API calls the first time.
     """
     if os.path.exists(DATA_PATH):
+        # genres is stored as a Python list; eval keeps that shape when reloading.
         return pd.read_csv(DATA_PATH, converters={"genres": eval})
 
     df = _fetch_movies(pages=5, min_vote_count=200)
