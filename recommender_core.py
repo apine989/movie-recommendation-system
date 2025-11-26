@@ -85,13 +85,18 @@ def apply_filters(
     """
     out = df.copy()
 
-    # Make a numeric year column for safe comparisons.
-    out["year_num"] = pd.to_numeric(out["year"], errors="coerce")
+    # Make a numeric year column for safe comparisons, if we have a year column.
+    if "year" in out.columns:
+        out["year_num"] = pd.to_numeric(out["year"], errors="coerce")
 
-    if min_year is not None:
-        out = out[out["year_num"] >= min_year]
-    if max_year is not None:
-        out = out[out["year_num"] <= max_year]
+        if min_year is not None:
+            out = out[out["year_num"] >= min_year]
+        if max_year is not None:
+            out = out[out["year_num"] <= max_year]
+    else:
+        # Fall back to ignoring year filters if the column isn't there.
+        pass
+
     if min_rating is not None:
         out = out[out["vote_average"] >= min_rating]
     if min_votes is not None:
@@ -99,16 +104,12 @@ def apply_filters(
     if languages:
         out = out[out["original_language"].isin(languages)]
     if required_genres:
-        # Keep movies that contain ALL of the selected genres.
         out = out[
             out["genres"].apply(
                 lambda gs: all(g in gs for g in required_genres)
             )
         ]
-
-    # We don't need year_num in the final output.
-    out = out.drop(columns=["year_num"])
-
+    out = out.drop(columns=["year_num"], errors="ignore")
     return out
 
 
